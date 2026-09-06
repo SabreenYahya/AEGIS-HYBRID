@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated security telemetry / runtime state
+*.log
+logs/
+state/*.json
+runtime/
+
+# ML artifacts and local datasets
+*.pkl
+*.joblib
+*.onnx
+*.pt
+*.pth
+data/raw/
+data/processed/
+data/runtime/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.npm/
+.eslintcache
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test / coverage artifacts
+coverage/
+.pytest_cache/
+
+# Local tooling artifacts
+.manus-logs/
+__manus__/
