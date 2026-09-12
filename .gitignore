@@ -1,0 +1,54 @@
+# =========================================================
+# Secrets & environment
+# =========================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# =========================================================
+# Python
+# =========================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# =========================================================
+# Model artifacts & generated data
+# Regenerate via ml/prepare_dataset.py + ml/train_model.py
+# Never trust a committed .pkl/.csv/.json as "current results"
+# =========================================================
+data/*.pkl
+data/*.csv
+data/*.json
+!data/.gitkeep
+evaluation_results/
+
+# =========================================================
+# Raw telemetry / captured logs (may contain sensitive input)
+# =========================================================
+/opt/logs/
+*.log
+
+# =========================================================
+# Frontend build artifacts (if a dashboard is added later)
+# =========================================================
+node_modules/
+dist/
+.manus-logs/
+__manus__/
+*.tsbuildinfo
+
+# =========================================================
+# OS / IDE
+# =========================================================
+.DS_Store
+.vscode/
+.idea/

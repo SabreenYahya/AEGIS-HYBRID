@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[project]
+name = "aegis-hybrid"
+version = "0.1.0"
+description = "Hybrid behavioral IDS research prototype combining Suricata + Cowrie telemetry, session-level feature engineering, and XGBoost-based scoring."
+requires-python = ">=3.10"
