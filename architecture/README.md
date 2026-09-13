@@ -1,110 +1,97 @@
 # AEGIS-HYBRID System Architecture
 
-AEGIS-HYBRID is organized as a multi-layer defensive analytics pipeline. The design separates collection, processing, behavioral analysis, decision/fusion, and SOC presentation so that each stage has a clear responsibility and test boundary.
+AEGIS-HYBRID is an **offline/batch defensive analytics pipeline**. It separates telemetry parsing, normalization, source-specific behavioral sessionization, feature engineering, ML scoring, heuristic fusion, and downstream timeline/campaign analysis.
 
 ## Layer 1 — Collection
 
 **Sources:**
-- **Suricata IDS** — network telemetry, alerts, protocols, flows, source/destination context.
-- **Cowrie Honeypot** — SSH/Telnet login attempts, sessions, commands, and attacker interaction.
+- **Suricata IDS** — network telemetry, alerts, protocols, flows, and source/destination context.
+- **Cowrie Honeypot** — SSH/Telnet interaction, login attempts, sessions, and commands.
 
-**Input:** network activity and honeypot interaction.
-
-**Output:** heterogeneous source logs such as `eve.json` and `cowrie.json`.
+The repository consumes exported log files. It does not currently capture packets or run a live detection loop.
 
 ## Layer 2 — Processing
 
-### Parsing
-Source-specific records are parsed and relevant security fields are extracted.
+### Parsing and normalization
+`core/parser.py` converts supported Cowrie and Suricata records into the shared `UnifiedEvent` schema.
 
-### Normalization
-Different source schemas are converted into a common **Unified Event Schema** so downstream components do not need source-specific logic.
+### Sessionization
+`core/session_builder.py` groups events by **source and source IP**, then splits groups by time gaps and maximum session size.
 
-**Why this boundary matters:** raw Suricata and Cowrie records cannot be reliably fused directly because their schemas and semantics differ.
+**Important:** this means Cowrie and Suricata events are normalized through the same schema and pipeline, but the current implementation does **not** create a single cross-source behavioral session for one attacker. Cross-source correlation remains outside the canonical sessionization logic.
 
 ## Layer 3 — Behavioral Analysis
 
-### Sessionization
-Related events are grouped into **Behavioral Sessions** using source identity and temporal context.
+Behavioral sessions are converted into numerical features describing activity volume, timing, burstiness, stage transitions, command diversity, port/IP fan-out, and related indicators.
 
-Example:
-
-```text
-Port Scan
-   -> SSH Connection
-   -> Failed Login
-   -> Failed Login
-   -> Successful Login
-   -> whoami
-   -> uname -a
-```
-
-These events can represent one connected attacker activity sequence rather than seven independent attacks.
-
-### Feature Engineering
-Behavioral sessions are converted into numerical features describing activity volume, timing, burstiness, diversity, transitions, and other security-relevant behavior.
-
-### Machine Learning
-The primary classification path uses **XGBoost** to estimate threat probability from session-level features.
+The primary classifier is a calibrated **XGBoost** model trained offline from the dataset produced by `ml/prepare_dataset.py`.
 
 ## Layer 4 — Decision & Correlation
 
 ### Hybrid Fusion Engine
-The Fusion Engine combines machine-learning output with behavioral indicators and attack-stage evidence to produce a unified threat assessment.
+`core/fusion_engine.py` combines the ML probability with hand-tuned behavioral indicators into a single threat score. The fusion weights are heuristic and have not been independently validated for out-of-distribution traffic.
 
-### Campaign & Timeline Analysis
-Related sessions can be correlated into multi-stage attack campaigns and reconstructed as timelines.
+### Attack timeline and campaign analysis
+`core/attack_timeline.py` and `core/apt_campaign_engine.py` perform deterministic, threshold-based analysis. Their APT labels are heuristic labels and are **not verified APT detection**.
 
-### Threat Enrichment
-Observed behavior can be mapped to **MITRE ATT&CK** techniques and **Cyber Kill Chain** stages for analyst context.
+### Active response
+`core/active_response.py` contains an optional lab-only `iptables` response. It is disabled by default, restricted by an explicit CIDR allowlist, and dry-run by default. There is no automatic rollback.
 
-## SOC Presentation & Response
+## Experimental components
 
-The analytical results are exposed through the SOC dashboard for monitoring and investigation. A basic IP-blocking capability exists as an experimental response mechanism.
+`experimental/` contains runnable but disconnected research components:
 
-Automated response must remain separated from detection logic and protected by allowlists, validation, cooldowns, audit logging, and rollback mechanisms before being treated as operationally safe.
+- MITRE ATT&CK keyword mapping
+- Isolation Forest anomaly detection
+- Local Ollama/LLM investigation summaries
+- An alternate stateful session builder
 
-## Data Flow
+None is called by `pipeline/offline_pipeline.py`, so none should be described as part of the canonical detection decision.
+
+## Canonical data flow
 
 ```text
 Suricata ─┐
-          ├─> Parser ─> Normalization ─> Behavioral Sessions
-Cowrie ───┘                                  |
-                                             v
-                                      Feature Engineering
-                                             |
-                                             v
-                                          XGBoost
-                                             |
-                                             v
-                                      Fusion Engine
-                                             |
-                         ┌───────────────────┼───────────────────┐
-                         v                   v                   v
-                   Threat Score        Campaigns/Timeline   MITRE Mapping
-                         └───────────────────┼───────────────────┘
-                                             v
-                                       SOC Dashboard
-                                             |
-                                             v
-                                    Analyst / Response
+          ├─> Parser / Unified Events
+Cowrie ───┘          │
+                     ▼
+          Source + Source-IP Sessions
+                     │
+                     ▼
+          Feature Engineering
+                     │
+                     ▼
+              XGBoost Score
+                     │
+                     ▼
+             Hybrid Fusion Score
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+      Timeline    Campaign   Active Response
+      heuristics  heuristics  (gated/optional)
+          └──────────┼──────────┘
+                     ▼
+             Offline SOC JSON
 ```
 
-## Engineering Classification
+## Engineering classification
 
 | Area | Classification |
 |---|---|
-| Suricata + Cowrie collection | Core |
+| Suricata + Cowrie file telemetry | Core input |
 | Parsing + normalization | Core |
-| Behavioral sessions | Core |
+| Source-specific behavioral sessions | Core |
+| Cross-source session correlation | **Not implemented** |
 | Feature engineering | Core |
 | XGBoost classifier | Core |
-| Hybrid Fusion Engine | Core |
-| Campaign/timeline analysis | Core |
-| MITRE/Cyber Kill Chain enrichment | Core |
-| Dashboard | Core |
-| Active response | Experimental / hardening required |
-| LLM assistance | Experimental |
-| Enterprise SaaS features | Future scope |
+| Hybrid Fusion Engine | Core, heuristic weights |
+| Campaign/timeline analysis | Core, heuristic |
+| MITRE mapping | Experimental / not wired |
+| Isolation Forest | Experimental / not wired |
+| LLM investigation | Experimental / not wired |
+| Dashboard | **Not included** |
+| Live/streaming detection | **Not implemented** |
+| Active response | Optional lab artifact / disabled by default |
 
-The architecture documentation describes the implemented research system. Future product capabilities must not be presented as implemented unless their code, tests, and operational documentation exist in this repository.
+This document intentionally describes only capabilities that exist in the current repository. Future integrations must not be presented as implemented until code, tests, and operational documentation exist.
