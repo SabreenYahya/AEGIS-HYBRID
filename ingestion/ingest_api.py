@@ -1,20 +1,19 @@
 """
-Cowrie event ingestion endpoint.
+Standalone Cowrie event ingestion endpoint.
 
-Hardened relative to the original prototype:
+This utility is NOT part of the canonical offline detection pipeline.
+It accepts authenticated event payloads and writes normalized Cowrie
+records to a local queue/file for later batch processing.
+
+Security properties:
   - Requires a shared-secret API key (X-API-Key header), checked with
-    constant-time comparison. Refuses to start if INGEST_API_KEY is unset.
-  - Per-client in-memory rate limiting (INGEST_RATE_LIMIT_PER_MIN).
-  - Bounded LRU dedup cache instead of an unbounded set() — the original
-    prototype's `seen = set()` grew forever and was an unbounded-memory
-    DoS vector under sustained traffic.
-  - Binds to INGEST_API_HOST (default 127.0.0.1), not 0.0.0.0, so it is
-    not reachable off-host unless explicitly configured to be.
+    constant-time comparison. Refuses to start without INGEST_API_KEY.
+  - Per-client in-memory rate limiting.
+  - Bounded LRU dedup cache.
+  - Binds to INGEST_API_HOST (default 127.0.0.1).
 
-Still lab-grade, not production-grade: no TLS termination here (put a
-reverse proxy in front of it if you expose this beyond localhost), and
-Flask's development server should not be the final deployment target
-(see SECURITY.md and the __main__ block below).
+Still lab-grade: no TLS termination is provided and Flask's development
+server is not an appropriate public deployment target.
 """
 
 import hmac
@@ -36,23 +35,20 @@ logger = logging.getLogger("aegis.ingest_api")
 app = Flask(__name__)
 
 LOG_FILE = os.getenv("INGEST_OUTPUT_LOG", "/opt/logs/cowrie.json")
-ERROR_LOG = os.getenv("INGEST_ERROR_LOG", "/opt/logs/errors.log")
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-
 _event_queue: Queue = Queue(maxsize=10000)
 
-# Bounded dedup cache: OrderedDict as a simple LRU, capped at _DEDUP_MAX.
 _DEDUP_MAX = 50_000
 _seen: "OrderedDict[str, None]" = OrderedDict()
 _seen_lock = threading.Lock()
 
-# Per-client sliding-window rate limiting.
 _rate_windows: dict = {}
 _rate_lock = threading.Lock()
+_writer_started = False
+_writer_start_lock = threading.Lock()
 
 
 def _dedup_check_and_add(uid: str) -> bool:
-    """Returns True if uid was already seen (i.e., this is a duplicate)."""
+    """Return True if uid was already seen."""
     if uid is None:
         return False
     with _seen_lock:
@@ -96,10 +92,18 @@ def _normalize(event: dict) -> dict:
     }
 
 
+def _json_dumps(obj) -> str:
+    import json
+    return json.dumps(obj)
+
+
 def _writer_loop() -> None:
     while True:
         event = _event_queue.get()
         try:
+            directory = os.path.dirname(LOG_FILE)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
             with open(LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(_json_dumps(event) + "\n")
         except OSError as exc:
@@ -108,16 +112,19 @@ def _writer_loop() -> None:
             _event_queue.task_done()
 
 
-def _json_dumps(obj) -> str:
-    import json
-    return json.dumps(obj)
-
-
-threading.Thread(target=_writer_loop, daemon=True).start()
+def _ensure_writer_started() -> None:
+    global _writer_started
+    if _writer_started:
+        return
+    with _writer_start_lock:
+        if not _writer_started:
+            threading.Thread(target=_writer_loop, daemon=True, name="aegis-ingest-writer").start()
+            _writer_started = True
 
 
 @app.before_request
 def _auth_and_rate_limit():
+    _ensure_writer_started()
     if not _require_api_key():
         logger.warning("Rejected unauthenticated request from %s", request.remote_addr)
         return jsonify({"error": "unauthorized"}), 401
@@ -167,10 +174,10 @@ def healthz():
 
 
 if __name__ == "__main__":
-    settings.require_ingest_api_key()  # fail fast, not silently unauthenticated
+    settings.require_ingest_api_key()
+    _ensure_writer_started()
     logger.warning(
         "Running Flask's built-in server. For anything beyond local testing, "
-        "run this behind a WSGI server (gunicorn/uwsgi) and a TLS-terminating "
-        "reverse proxy — see SECURITY.md."
+        "use a WSGI server and TLS-terminating reverse proxy — see SECURITY.md."
     )
     app.run(host=settings.INGEST_API_HOST, port=settings.INGEST_API_PORT, threaded=True)
