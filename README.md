@@ -1,80 +1,75 @@
 # AEGIS-HYBRID
 
-A hybrid behavioral intrusion detection research prototype: fuses
-Suricata (network IDS) and Cowrie (SSH honeypot) telemetry into
-per-source-IP behavioral sessions, extracts a feature vector per
-session, scores it with a calibrated XGBoost model, and combines that
-score with hand-tuned behavioral indicators (stage progression, burst
-timing, lateral-movement fan-out) into a single hybrid threat score.
+A hybrid behavioral intrusion-detection research prototype that processes Suricata network telemetry and Cowrie honeypot telemetry through a shared normalization, sessionization, feature-engineering, XGBoost scoring, and behavioral-fusion pipeline.
 
-Built and evaluated inside an isolated VMware lab network as a
-graduation project. **Not a production IDS/IPS** — see
-[`SECURITY.md`](SECURITY.md) before deploying any part of this beyond
-a lab.
+**Important architectural limitation:** the current canonical session builder keeps Cowrie and Suricata sessions source-specific (`source + src_ip`). The repository therefore does **not** currently perform cross-source event fusion inside one behavioral session. The hybrid decision combines ML scoring with hand-tuned behavioral heuristics; multi-source telemetry is processed by the same pipeline but is not yet correlated into a single per-attacker session.
 
-For an honest breakdown of what is actually wired into the detection
-path versus what is implemented-but-standalone, see
-[`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md). For what changed
-during the public-release cleanup and why, see
-[`MIGRATION_NOTES.md`](MIGRATION_NOTES.md).
+Built and evaluated inside an isolated VMware lab network as a graduation-project research prototype. **Not a production IDS/IPS and not a live/streaming detection system.** See [`SECURITY.md`](SECURITY.md) before deploying any component beyond a lab.
+
+For the exact distinction between the canonical detection path and standalone experimental components, see [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md). For public-release cleanup history, see [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md).
 
 ## Architecture
 
-```
-Cowrie honeypot ──┐
-                   ├──> core/parser.py ──> core/session_builder.py ──> core/feature_engine.py
-Suricata IDS ──────┘                                                          │
-                                                                                ▼
-                                                          ml/train_model.py (XGBoost, offline)
-                                                                                │
-                                                                                ▼
-                                                    core/fusion_engine.py (ML score + behavior)
-                                                                                │
-                                            ┌───────────────────────────────────┼──────────────────────────┐
-                                            ▼                                   ▼                          ▼
-                              core/attack_timeline.py            core/apt_campaign_engine.py   core/active_response.py
-                              (stage sequence, heuristic          (campaign fingerprinting,      (disabled by default,
-                               APT-likelihood label)               heuristic APT score)           gated + dry-run)
-                                            │                                   │
-                                            └───────────────┬───────────────────┘
-                                                             ▼
-                                          pipeline/offline_pipeline.py
-                                                             │
-                                                             ▼
-                                        data/final_soc_output.json
+```text
+Cowrie ───────────────┐
+                      ├──> core/parser.py
+Suricata ─────────────┘          │
+                                 ▼
+                       core/session_builder.py
+                       (source + source-IP sessions)
+                                 │
+                                 ▼
+                       core/feature_engine.py
+                                 │
+                                 ▼
+                         XGBoost model (offline)
+                                 │
+                                 ▼
+                       core/fusion_engine.py
+                       (ML + behavioral heuristics)
+                                 │
+              ┌──────────────────┼──────────────────┐
+              ▼                  ▼                  ▼
+      attack timeline     campaign heuristics   active response
+        (heuristic)           (heuristic)       (disabled by default)
+              └──────────────────┼──────────────────┘
+                                 ▼
+                   pipeline/offline_pipeline.py
+                                 │
+                                 ▼
+                    data/final_soc_output.json
 ```
 
-`experimental/` contains real, runnable code (MITRE mapping, Isolation
-Forest, LLM-assisted incident summaries, an alternate session builder)
-that is **not** called from `pipeline/offline_pipeline.py`. See
-`experimental/README.md`.
+`experimental/` contains runnable research components (MITRE mapping, Isolation Forest, local-LLM investigation summaries, and an alternate session builder) that are **not called by** `pipeline/offline_pipeline.py`. They must not be presented as active detection capabilities.
+
+## Scope
+
+- **Canonical path:** offline/batch processing only.
+- **Telemetry:** Suricata `eve.json` and Cowrie JSON logs supplied by the operator.
+- **Primary ML model:** calibrated XGBoost classifier.
+- **Hybrid scoring:** XGBoost probability plus hand-tuned behavioral indicators.
+- **Response:** optional lab-only `iptables` block mechanism, disabled by default and protected by multiple gates.
+- **Not included:** live/streaming detection, a dashboard, production deployment, or a verified APT detector.
 
 ## Quick start
+
+Use Python **3.11+** (the canonical pipeline imports `datetime.UTC`).
 
 ```bash
 git clone <this-repo>
 cd AEGIS-HYBRID
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then edit paths / INGEST_API_KEY as needed
+cp .env.example .env   # edit telemetry/model paths as needed
 ```
 
-Build the dataset and train the model from your own Cowrie/Suricata
-logs (paths configured in `.env`):
+Build the dataset and train the model from your own Cowrie/Suricata logs:
 
 ```bash
 python -m ml.prepare_dataset
 python -m ml.train_model
 python -m pipeline.offline_pipeline   # writes data/final_soc_output.json
-python -m evaluation.evaluate_system  # writes evaluation_results/metrics.json
-```
-
-Run the (optional, authenticated) ingestion API for live Cowrie log
-shipping:
-
-```bash
-export $(grep -v '^#' .env | xargs)  # or use python-dotenv in your own launcher
-python -m ingestion.ingest_api
+python -m evaluation.evaluate_system # writes evaluation_results/metrics.json
 ```
 
 Run the test suite:
@@ -83,23 +78,37 @@ Run the test suite:
 pytest
 ```
 
+### Optional auxiliary ingestion API
+
+`ingestion/ingest_api.py` is a hardened **standalone log-shipping utility**. It is **not part of the canonical offline detection path** and does not make AEGIS-HYBRID a live IDS. It requires `INGEST_API_KEY`, binds to `127.0.0.1` by default, and remains lab-grade. See `SECURITY.md` before using it.
+
+```bash
+export $(grep -v '^#' .env | xargs)
+python -m ingestion.ingest_api
+```
+
+## Data and evaluation caveats
+
+The repository intentionally does not commit a trained model, raw telemetry, or generated metrics. The dataset builder uses source-based heuristic labels, and the current train/evaluation code selects a threshold on the same held-out split used for reported metrics. These choices can make performance optimistic and can allow the model to learn source-specific artifacts rather than general malicious behavior. Do **not** cite the historical thesis metrics as results of this repository; regenerate and report versioned metrics from the current code instead.
+
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `config/` | Environment-driven settings (no hardcoded paths or secrets). |
-| `core/` | The wired detection path: parsing, sessionization, feature engineering, fusion scoring, timeline/campaign heuristics, active response. |
+| `config/` | Environment-driven settings and safe defaults. |
+| `core/` | Canonical parsing, source-specific sessionization, feature engineering, fusion, timeline/campaign heuristics, and active-response gate. |
 | `ml/` | Dataset construction and XGBoost training. |
-| `ingestion/` | Authenticated, rate-limited Cowrie event ingestion API. |
-| `pipeline/` | The offline batch pipeline that ties `core/` and `ml/` together and produces the SOC output JSON. |
-| `evaluation/` | Held-out evaluation of the fused detection path. |
-| `experimental/` | Implemented but not currently wired into detection — see its own README. |
-| `tests/` | Unit tests, including safety-gate tests for `core/active_response.py`. |
-| `docs/` | Status/classification and methodology caveats. |
+| `pipeline/` | Offline batch detection pipeline and SOC JSON output. |
+| `evaluation/` | Evaluation of the fused scoring path. |
+| `ingestion/` | Optional standalone Cowrie event ingestion utility; not part of offline detection. |
+| `experimental/` | Implemented but not wired research components. |
+| `tests/` | Focused unit and safety-gate tests. |
+| `architecture/` | Architecture notes matching the current implementation. |
+| `docs/` | Status, methodology caveats, and release-audit records. |
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+The repository's original source and documentation are **not released under the MIT License**. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for the applicable copyright and permission terms. Third-party dependencies remain subject to their respective licenses.
 
 ## Author & Copyright
 
@@ -109,6 +118,4 @@ MIT — see [`LICENSE`](LICENSE).
 
 This repository is publicly viewable for reference and portfolio purposes. Reuse,
 redistribution, modification, publication, or commercial use requires explicit
-written permission from the copyright holders. Third-party dependencies remain
-subject to their respective licenses.
-
+written permission from the copyright holders.
