@@ -1,102 +1,47 @@
-# Final Public Release Audit
+# Public Release Audit Record
 
-This file did not exist before this entry. It consolidates the three
-audit rounds actually performed on this repository, in order, with no
-assumed prior history.
+This document records the repository-release audits and their scope. It is not a substitute for a reproducible ML evaluation report.
 
-## Round 1 — Restructuring (security + dead-code removal)
+## Previous release audit rounds
 
-- Rebuilt from the original prototype into `core/` / `ml/` /
-  `ingestion/` / `pipeline/` / `evaluation/` / `experimental/`.
-- Hardened `ingestion/ingest_api.py` (API key auth, bounded dedup
-  cache, per-IP rate limiting, no `0.0.0.0` bind by default).
-- Made `core/active_response.py` disabled-by-default with a CIDR
-  allowlist and dry-run default.
-- Removed dead/misleading code and stale outputs — full list and
-  rationale in `MIGRATION_NOTES.md`.
-- Removed the undocumented `soft_recall_boost()` from evaluation.
+Earlier rounds covered restructuring, removal of misleading/dead legacy components, ingestion hardening, active-response safety gates, and focused unit tests. The previous lightweight suite recorded **23/23 tests passed**; it did not run training or end-to-end evaluation.
 
-## Round 2 — Verification of Round 1
+## Independent repository audit — 2026-09-13
 
-Read-only verification (no training/evaluation run):
+A fresh read-only audit of the current public repository was performed across the repository tree, canonical pipeline, ML/evaluation code, configuration, security controls, tests, experimental boundary, and release documentation.
 
-- Confirmed `MIGRATION_NOTES.md` wording changes were applied exactly
-  as specified (dropped the "byte-for-byte" claim; corrected the
-  claim about the four removed legacy modules being "preserved in
-  local git history").
-- Confirmed `docs/PROJECT_STATUS.md` carries an explicit warning
-  separating the thesis/presentation metrics from this repository's
-  (not-yet-generated) results.
-- Confirmed the four removed modules (`siem_correlation.py`,
-  `alerting.py`, `threat_scoring.py`, `classifier_v2.py`) have zero
-  references anywhere except the documentation explaining their
-  removal.
-- Confirmed no stale `_v2`/`_v3`/`analysis.*`/`visualization/`
-  references exist in actual code (only in migration-log prose).
-- Confirmed all 19 internal modules import successfully at runtime
-  (18/19 in the audit sandbox; the 1 failure was `xgboost` being
-  absent from that sandbox specifically, not a code defect —
-  `xgboost==2.0.3` is correctly pinned in `requirements.txt` and the
-  file passes `py_compile`).
-- Confirmed every `python -m ...` command referenced in `README.md`
-  and `docs/PROJECT_STATUS.md` matches a real file with a
-  `__main__` entry point.
-- Confirmed all 15 environment variables read in `config/settings.py`
-  are documented in `.env.example`.
-- **Open item at end of Round 2:** no `.git` repository exists yet in
-  the working copy, so no real `git diff`/`git status` could be
-  produced — only direct text comparison of the two edited files.
-- **Open item at end of Round 2 (unresolved by design — training/
-  evaluation was explicitly out of scope):** metrics reproducibility.
-  See the warning in `docs/PROJECT_STATUS.md` — this remains gated
-  and is intentionally **not** resolved by this audit entry.
+### Material findings
 
-## Round 3 — Active Response correctness fix
+1. **Documentation overstated cross-source fusion.** The previous architecture text implied that Cowrie and Suricata events were fused into one behavioral session. The actual `core/session_builder.py` groups by source + source IP, so cross-source session correlation is not implemented.
+2. **README/license wording was inconsistent.** `README.md` previously said `MIT` while `LICENSE` explicitly reserved rights. The README now reflects the actual repository license terms.
+3. **Python-version metadata was inconsistent.** `pyproject.toml` declared Python >=3.10 although the canonical pipeline imports `datetime.UTC`, which requires Python 3.11+. The metadata now requires >=3.11.
+4. **Ingestion import had an avoidable filesystem side effect.** Importing `ingestion.ingest_api` previously created `/opt/logs` and started a writer thread. The writer is now started lazily when the utility is used, and its output directory is created only when writing.
+5. **The canonical/offline boundary was unclear for ingestion.** Documentation now explicitly classifies the ingestion API as a standalone auxiliary log-shipping utility, not as a live detection path.
 
-**Problem:** `request_block()` added the IP to `_BLOCKED_IPS` before
-confirming the `iptables` command had actually succeeded;
-`_execute_block()` used `subprocess.run(..., check=False)` and
-returned nothing, so failure was indistinguishable from success.
+### Methodology findings intentionally not “fixed” in this release
 
-**Fix (file changed: `core/active_response.py` only):**
-- `_execute_block(ip)` now returns `bool`, `True` only if the
-  `iptables` process exited with status `0`.
-- `request_block()` no longer adds the IP to `_BLOCKED_IPS` until
-  `_execute_block()` has confirmed success.
-- A failed execution now returns `"execution_failed"` and leaves
-  `blocked_ips()` unchanged.
-- `"executed"` is returned only after confirmed success.
-- Unchanged: disabled-by-default behavior, dry-run behavior, CIDR
-  allowlist, IP validation, cooldown logic, the iptables command
-  itself, and the overall three-gate safety model.
+- Source-based labeling remains a known label-leakage risk.
+- Threshold selection remains fit on the held-out split; this requires a methodological evaluation redesign, not a safe cosmetic patch.
+- Fusion weights remain hand-tuned and unvalidated out of distribution.
+- No cross-source session correlation was added because doing so would redesign the current project rather than correct a defect.
+- No dashboard, live capture, MITRE wiring, Isolation Forest integration, LLM decisioning, or continual-learning functionality was added.
 
-**Test changed:** `tests/test_active_response.py` — added
-`test_execution_failure_returns_execution_failed_and_does_not_record_ip`
-and `test_execution_success_returns_executed_and_records_ip`, both
-via monkeypatching `_execute_block` directly (no real `subprocess`/
-`iptables` invocation in either test).
+### Current release position
 
-**Test run (lightweight suite only — no training, no evaluation):**
-`tests/test_event_schema.py`, `tests/test_parser.py`,
-`tests/test_fusion_engine.py`, `tests/test_active_response.py`
-→ **23/23 passed**, 0 failed.
+The repository can honestly be presented as an **Offline Hybrid IDS research/engineering prototype** when the description explicitly states:
 
-**Confirmed:** no real `iptables`/`sudo` command was executed during
-this fix or its tests — every test that reaches the execution branch
-mocks `_execute_block` itself, so the real function containing the
-`subprocess.run(["sudo", "-n", "iptables", ...])` call was never
-invoked.
+- offline/batch operation;
+- source-specific Cowrie/Suricata sessionization rather than cross-source session fusion;
+- calibrated XGBoost plus hand-tuned behavioral fusion;
+- heuristic timeline/campaign/APT labels;
+- lab-only active response, disabled by default;
+- experimental components are not part of the canonical decision path;
+- historical thesis metrics are not current repository metrics.
 
-## Final verdict
+The code is suitable for public portfolio review with these limitations. It should **not** be presented as a production IDS/IPS, live SOC platform, verified APT detector, or experimentally validated general-purpose detector.
 
-🟢 **READY FOR PUBLIC RELEASE** — scoped to code correctness,
-security posture, and internal consistency, which is what Rounds 1–3
-actually audited.
+## Final assessment
 
-This verdict does **not** override the separate, still-open
-metrics-publication gate documented at the top of
-`docs/PROJECT_STATUS.md`. That gate governs what performance numbers
-may be *claimed* about this repository (none have been generated
-here yet); it is not a code defect and does not block publishing the
-code itself. Do not remove that warning box when reading this verdict
-as "green."
+**READY WITH LIMITATIONS** for public GitHub portfolio use.
+
+The remaining limitations are primarily methodological and scope-related rather than evidence of a hidden production capability. They should remain visible in the project documentation rather than being masked by additional claims or speculative refactoring.
