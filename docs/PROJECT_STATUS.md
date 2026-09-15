@@ -32,12 +32,12 @@ This table reflects the current canonical implementation. Anything not imported 
 ## Current ML/evaluation methodology
 
 - Dataset labels remain heuristic/source-based; they are not verified ground truth.
-- Training now uses a deterministic **60% train / 20% validation / 20% test** split.
-- Threshold selection is performed on the validation partition only.
-- The test partition is reserved for final metrics.
+- Training uses a deterministic **60% train / 20% validation / 20% test** split.
+- The runtime decision threshold is selected on **validation fusion scores**, not raw ML probabilities and not the test set.
+- The untouched test partition is reserved for final evaluation.
+- The selected threshold is persisted as `threshold_space: "fusion_score"` and is consumed by the offline pipeline through the configured detection-threshold contract.
 - The split is deterministic (`random_state=42`) for reproducibility, but it is not a substitute for attacker/time/group-aware splitting.
 - Fusion weights remain hand-tuned and are not independently validated for out-of-distribution traffic.
-- `ml/train_model.py` persists the validation-selected model threshold, while runtime `pipeline/offline_pipeline.py` still uses the environment-controlled `DETECTION_THRESHOLD`. This is an intentional operational boundary and should be kept synchronized before publishing a benchmark tied to runtime behavior.
 
 ## Dataset caveat
 
