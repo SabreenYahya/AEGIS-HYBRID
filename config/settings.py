@@ -1,16 +1,9 @@
-"""
-Centralized configuration.
-
-Everything that was previously hardcoded (file paths, thresholds, the
-iptables active-response switch) is read from environment variables here,
-with safe defaults. Load a .env file in local development with
-python-dotenv; in production, set real environment variables instead.
-"""
+"""Centralized environment-driven configuration."""
 
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # no-op if .env is absent — fine for CI/production
+load_dotenv()
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -44,22 +37,24 @@ DATASET_OUTPUT_PATH = os.getenv("DATASET_OUTPUT_PATH", "data/dataset.csv")
 DASHBOARD_OUTPUT_PATH = os.getenv("DASHBOARD_OUTPUT_PATH", "data/final_soc_output.json")
 
 # --- Ingestion API ---
-INGEST_API_KEY = os.getenv("INGEST_API_KEY")  # required — no insecure default
+INGEST_API_KEY = os.getenv("INGEST_API_KEY")
 INGEST_API_HOST = os.getenv("INGEST_API_HOST", "127.0.0.1")
 INGEST_API_PORT = _int("INGEST_API_PORT", 5000)
 INGEST_RATE_LIMIT_PER_MIN = _int("INGEST_RATE_LIMIT_PER_MIN", 120)
 
-# --- Active response (safety-critical: see core/active_response.py) ---
+# --- Active response ---
 ENABLE_ACTIVE_RESPONSE = _bool("ENABLE_ACTIVE_RESPONSE", False)
 ACTIVE_RESPONSE_ALLOWED_CIDRS = [
-    c.strip()
-    for c in os.getenv("ACTIVE_RESPONSE_ALLOWED_CIDRS", "").split(",")
-    if c.strip()
+    c.strip() for c in os.getenv("ACTIVE_RESPONSE_ALLOWED_CIDRS", "").split(",") if c.strip()
 ]
 ACTIVE_RESPONSE_DRY_RUN = _bool("ACTIVE_RESPONSE_DRY_RUN", True)
 
 # --- Detection ---
-DETECTION_THRESHOLD = _float("DETECTION_THRESHOLD", 0.42)
+# If unset, the trained model's validation-selected fusion threshold is used.
+# Set DETECTION_THRESHOLD explicitly to override it for an experiment.
+DETECTION_THRESHOLD = None
+if os.getenv("DETECTION_THRESHOLD") is not None:
+    DETECTION_THRESHOLD = _float("DETECTION_THRESHOLD", 0.42)
 
 # --- Optional LLM investigation layer (not part of detection decisions) ---
 OLLAMA_URL = os.getenv("OLLAMA_URL", "")
@@ -67,7 +62,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-r1:1.5b")
 
 
 def require_ingest_api_key() -> str:
-    """Fail fast at startup instead of running an unauthenticated endpoint."""
+    """Fail fast instead of running an unauthenticated ingestion endpoint."""
     if not INGEST_API_KEY:
         raise RuntimeError(
             "INGEST_API_KEY is not set. Refusing to start an unauthenticated "
