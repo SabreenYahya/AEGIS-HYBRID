@@ -1,121 +1,212 @@
+<div align="center">
+
 # AEGIS-HYBRID
 
-A hybrid behavioral intrusion-detection research prototype that processes Suricata network telemetry and Cowrie honeypot telemetry through a shared normalization, sessionization, feature-engineering, XGBoost scoring, and behavioral-fusion pipeline.
+### From Deception to Learning — an offline hybrid behavioral detection research prototype
 
-**Important architectural limitation:** the current canonical session builder keeps Cowrie and Suricata sessions source-specific (`source + src_ip`). The repository therefore does **not** currently perform cross-source event fusion inside one behavioral session. The hybrid decision combines ML scoring with hand-tuned behavioral heuristics; multi-source telemetry is processed by the same pipeline but is not yet correlated into a single per-attacker session.
+Suricata + Cowrie telemetry → normalized events → source-specific sessions → feature engineering → calibrated XGBoost → heuristic fusion → SOC-oriented verdicts
 
-Built and evaluated inside an isolated VMware lab network as a graduation-project research prototype. **Not a production IDS/IPS and not a live/streaming detection system.** See [`SECURITY.md`](SECURITY.md) before deploying any component beyond a lab.
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-pytest-0A0A0A?logo=pytest&logoColor=white)](tests/)
+[![Status](https://img.shields.io/badge/status-research%20prototype-orange)](docs/PROJECT_STATUS.md)
+[![Security](https://img.shields.io/badge/security-lab%20scope-red)](SECURITY.md)
 
-For the exact distinction between the canonical detection path and standalone experimental components, see [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md). For public-release cleanup history, see [`MIGRATION_NOTES.md`](MIGRATION_NOTES.md).
+</div>
+
+> **Scope first:** AEGIS-HYBRID is an offline/batch cybersecurity research prototype. It is **not** a production IDS/IPS, SIEM, live/streaming detector, or verified APT detector.
+
+## Why AEGIS-HYBRID?
+
+Signature-based network alerts and honeypot activity provide different views of attacker behavior. AEGIS-HYBRID explores a practical hybrid approach: normalize telemetry from **Suricata** and **Cowrie**, reconstruct source-specific behavioral sessions, derive behavioral features, score sessions with a calibrated **XGBoost** model, and combine that score with deterministic behavioral heuristics.
+
+The goal is not to claim perfect detection. The goal is to make the detection path **traceable, testable, and explicit about its evidence and limitations**.
+
+## What is actually implemented?
+
+| Capability | Status |
+|---|---|
+| Suricata `eve.json` parsing | Core |
+| Cowrie JSON parsing | Core |
+| Shared `UnifiedEvent` normalization | Core |
+| Source + source-IP sessionization | Core |
+| Behavioral feature engineering | Core |
+| Calibrated XGBoost scoring | Core |
+| Hand-tuned ML + behavioral fusion | Core / heuristic |
+| Attack timeline analysis | Core / heuristic |
+| Campaign analysis | Core / heuristic |
+| Lab-only `iptables` response | Implemented, disabled by default |
+| Cross-source per-attacker session correlation | **Not implemented** |
+| Live/streaming detection | **Not implemented** |
+| Dashboard | **Not included** |
+| MITRE mapping | Experimental / not wired |
+| Isolation Forest | Experimental / not wired |
+| LLM investigation summaries | Experimental / not wired |
+
+See [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) for the canonical implementation classification.
 
 ## Architecture
 
-```text
-Cowrie ───────────────┐
-                      ├──> core/parser.py
-Suricata ─────────────┘          │
-                                 ▼
-                       core/session_builder.py
-                       (source + source-IP sessions)
-                                 │
-                                 ▼
-                       core/feature_engine.py
-                                 │
-                                 ▼
-                         XGBoost model (offline)
-                                 │
-                                 ▼
-                       core/fusion_engine.py
-                       (ML + behavioral heuristics)
-                                 │
-              ┌──────────────────┼──────────────────┐
-              ▼                  ▼                  ▼
-      attack timeline     campaign heuristics   active response
-        (heuristic)           (heuristic)       (disabled by default)
-              └──────────────────┼──────────────────┘
-                                 ▼
-                   pipeline/offline_pipeline.py
-                                 │
-                                 ▼
-                    data/final_soc_output.json
+```mermaid
+flowchart LR
+    S[Suricata eve.json] --> P[Parser + UnifiedEvent]
+    C[Cowrie JSON] --> P
+    P --> SB[Source + source-IP sessionization]
+    SB --> F[Feature engineering]
+    F --> M[Calibrated XGBoost]
+    M --> H[Heuristic hybrid fusion]
+    H --> T[Attack timeline]
+    H --> G[Campaign heuristics]
+    H --> R[Optional gated iptables response]
+    T --> O[Offline SOC JSON]
+    G --> O
+    R --> O
 ```
 
-`experimental/` contains runnable research components (MITRE mapping, Isolation Forest, local-LLM investigation summaries, and an alternate session builder) that are **not called by** `pipeline/offline_pipeline.py`. They must not be presented as active detection capabilities.
+### The important architectural boundary
 
-## Scope
+Both telemetry sources pass through the same normalization and detection pipeline, but the canonical session builder groups by **`source + src_ip`**. Suricata and Cowrie records therefore do **not** become one cross-source attacker session today. The term *hybrid* refers to the combination of multi-source telemetry, ML scoring, and behavioral fusion—not to a completed cross-source correlation engine.
 
-- **Canonical path:** offline/batch processing only.
-- **Telemetry:** Suricata `eve.json` and Cowrie JSON logs supplied by the operator.
-- **Primary ML model:** calibrated XGBoost classifier.
-- **Hybrid scoring:** XGBoost probability plus hand-tuned behavioral indicators.
-- **Response:** optional lab-only `iptables` block mechanism, disabled by default and protected by multiple gates.
-- **Not included:** live/streaming detection, a dashboard, production deployment, or a verified APT detector.
+## Detection flow
+
+```text
+Telemetry files
+    ↓
+Parsing + normalization
+    ↓
+Source-specific behavioral sessions
+    ↓
+Feature engineering
+    ↓
+Calibrated XGBoost probability
+    ↓
+Hand-tuned behavioral fusion
+    ↓
+Threshold decision
+    ↓
+Timeline / campaign heuristics
+    ↓
+SOC-oriented JSON output
+```
+
+The canonical entry point is [`pipeline/offline_pipeline.py`](pipeline/offline_pipeline.py). Components under `experimental/` are intentionally excluded from this path.
+
+## A concrete detection example
+
+A session containing high port spread, multiple behavioral stages, elevated event rate, and other risk indicators can receive a higher fused threat score. If that score crosses the configured detection threshold, the pipeline records a detection, derives a heuristic attack timeline/campaign view, and evaluates the optional response gate.
+
+This is **behavioral scoring**, not proof of attribution or proof of an APT campaign.
+
+## Evaluation integrity
+
+The repository intentionally does **not** ship a trained model, raw telemetry, or generated benchmark metrics.
+
+The original dataset builder uses heuristic labels:
+
+- Cowrie attack sessions → attack label.
+- Suricata sessions → label derived from alert-ratio thresholds.
+- Ambiguous Suricata sessions → excluded.
+
+This creates a real risk that the classifier learns source-specific artifacts rather than general malicious behavior. The evaluation methodology is therefore documented as a research limitation, not presented as a production benchmark.
+
+The training path uses a deterministic **train / validation / test** split. The decision threshold is selected on validation data and the final metrics are reserved for the test split. Do not report historical thesis metrics as results of this repository.
+
+See:
+
+- [`docs/ML_METHODOLOGY.md`](docs/ML_METHODOLOGY.md)
+- [`docs/EVALUATION.md`](docs/EVALUATION.md)
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)
 
 ## Quick start
 
-Use Python **3.11+** (the canonical pipeline imports `datetime.UTC`).
+Python **3.11+** is required by the canonical pipeline.
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/SabreenYahya/AEGIS-HYBRID.git
 cd AEGIS-HYBRID
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # edit telemetry/model paths as needed
+cp .env.example .env
 ```
 
-Build the dataset and train the model from your own Cowrie/Suricata logs:
+Build a dataset from your own supported telemetry, train, run the offline detector, then evaluate:
 
 ```bash
 python -m ml.prepare_dataset
 python -m ml.train_model
-python -m pipeline.offline_pipeline   # writes data/final_soc_output.json
-python -m evaluation.evaluate_system # writes evaluation_results/metrics.json
+python -m pipeline.offline_pipeline
+python -m evaluation.evaluate_system
 ```
 
-Run the test suite:
+Run tests:
 
 ```bash
 pytest
 ```
 
-### Optional auxiliary ingestion API
+> A trained model and telemetry are intentionally excluded from the public repository. The commands above require suitable local inputs configured through `.env`.
 
-`ingestion/ingest_api.py` is a hardened **standalone log-shipping utility**. It is **not part of the canonical offline detection path** and does not make AEGIS-HYBRID a live IDS. It requires `INGEST_API_KEY`, binds to `127.0.0.1` by default, and remains lab-grade. See `SECURITY.md` before using it.
+## Repository map
 
-```bash
-export $(grep -v '^#' .env | xargs)
-python -m ingestion.ingest_api
+```text
+AEGIS-HYBRID/
+├── core/             # Canonical parser, sessions, features, fusion, heuristics, response gate
+├── ml/               # Dataset construction and XGBoost training
+├── pipeline/         # Canonical offline detection entry point
+├── evaluation/       # End-to-end evaluation of the fused path
+├── ingestion/        # Standalone authenticated log-shipping utility
+├── experimental/     # Implemented but disconnected research components
+├── tests/             # Unit and safety-gate tests
+├── config/            # Environment-driven settings
+├── architecture/     # Architecture notes
+├── docs/              # Methodology, reproducibility, status, and limitations
+├── SECURITY.md       # Security scope and safe deployment guidance
+├── MIGRATION_NOTES.md # Public-release cleanup history
+└── NOTICE / LICENSE  # Attribution and usage terms
 ```
 
-## Data and evaluation caveats
+## Documentation
 
-The repository intentionally does not commit a trained model, raw telemetry, or generated metrics. The dataset builder uses source-based heuristic labels, and the current train/evaluation code selects a threshold on the same held-out split used for reported metrics. These choices can make performance optimistic and can allow the model to learn source-specific artifacts rather than general malicious behavior. Do **not** cite the historical thesis metrics as results of this repository; regenerate and report versioned metrics from the current code instead.
-
-## Repository layout
-
-| Path | Contents |
+| Document | Purpose |
 |---|---|
-| `config/` | Environment-driven settings and safe defaults. |
-| `core/` | Canonical parsing, source-specific sessionization, feature engineering, fusion, timeline/campaign heuristics, and active-response gate. |
-| `ml/` | Dataset construction and XGBoost training. |
-| `pipeline/` | Offline batch detection pipeline and SOC JSON output. |
-| `evaluation/` | Evaluation of the fused scoring path. |
-| `ingestion/` | Optional standalone Cowrie event ingestion utility; not part of offline detection. |
-| `experimental/` | Implemented but not wired research components. |
-| `tests/` | Focused unit and safety-gate tests. |
-| `architecture/` | Architecture notes matching the current implementation. |
-| `docs/` | Status, methodology caveats, and release-audit records. |
+| [`PROJECT_OVERVIEW`](docs/PROJECT_OVERVIEW.md) | Scope, goals, and engineering classification |
+| [`ARCHITECTURE`](docs/ARCHITECTURE.md) | Component boundaries and design decisions |
+| [`DATA_FLOW`](docs/DATA_FLOW.md) | Telemetry-to-verdict data flow |
+| [`DETECTION_PIPELINE`](docs/DETECTION_PIPELINE.md) | Exact canonical execution path |
+| [`ML_METHODOLOGY`](docs/ML_METHODOLOGY.md) | Features, training, calibration, thresholding |
+| [`EVALUATION`](docs/EVALUATION.md) | Metrics methodology and reproducibility caveats |
+| [`REPRODUCIBILITY`](docs/REPRODUCIBILITY.md) | Environment and repeatable workflow |
+| [`LIMITATIONS`](docs/LIMITATIONS.md) | Known technical and research limitations |
+| [`ROADMAP`](docs/ROADMAP.md) | Evidence-based future work |
+| [`PROJECT_STATUS`](docs/PROJECT_STATUS.md) | Implemented vs experimental classification |
 
-## License
+## Security
 
-The repository's original source and documentation are **not released under the MIT License**. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for the applicable copyright and permission terms. Third-party dependencies remain subject to their respective licenses.
+AEGIS-HYBRID processes security telemetry and contains an optional response mechanism. Read [`SECURITY.md`](SECURITY.md) before enabling any response or exposing the auxiliary ingestion service.
 
-## Author & Copyright
+## Research status
 
-**Author:** Sabreen Yahya Hajouri  
-**Project:** AEGIS-HYBRID  
-**Copyright © 2026 Sabreen Yahya Hajouri. All rights reserved.**
+**Classification: research prototype / graduation-project engineering artifact.**
 
-This repository is publicly viewable for reference and portfolio purposes. Reuse,
-redistribution, modification, publication, or commercial use requires explicit
-written permission from the copyright holders.
+The repository is structured for inspection and reproducibility, but it has not been validated as a production security control. In particular, labeling, source-specific sessionization, heuristic fusion, and active-response safety boundaries limit the conclusions that can be drawn from the current implementation.
+
+## Roadmap
+
+1. Cross-source attacker/session correlation with explicit identity and temporal semantics.
+2. Ground-truth or independently validated labeling strategy.
+3. Leakage-resistant dataset construction and split strategy for future experiments.
+4. Independent validation of fusion weights and thresholds.
+5. Reproducible benchmark datasets and versioned evaluation artifacts, where licensing permits.
+6. Any live/streaming implementation only after the offline path is validated and separately tested.
+
+## Author
+
+**Sabreen Yahya Hajouri — Cybersecurity Engineer**
+
+Focus: Threat Detection · Security Operations · Blue Team · Incident Response · Detection Engineering
+
+## License & ownership
+
+The original source code and documentation are protected by the repository terms in [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). The project is publicly viewable for reference and portfolio purposes; reuse, redistribution, modification, publication, commercial use, or derivative works require explicit written permission from the copyright holders.
+
+Third-party dependencies remain subject to their respective licenses.
