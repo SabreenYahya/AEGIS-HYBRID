@@ -1,12 +1,4 @@
-"""
-End-to-end offline/batch pipeline: load telemetry -> build sessions ->
-extract features -> score (XGBoost + fusion) -> build attack timeline
--> APT-heuristic label -> campaign correlation -> write SOC output JSON.
-
-This is the canonical, currently-wired detection path. Anything under
-experimental/ (Isolation Forest, MITRE mapping, LLM investigation) is
-NOT invoked from here — see docs/PROJECT_STATUS.md for integration status.
-"""
+"""Canonical offline/batch detection pipeline."""
 
 import json
 import logging
@@ -43,7 +35,7 @@ def _load_model(path: str):
 def _ml_score(model, X) -> float:
     try:
         return float(np.clip(model.predict_proba(X)[0][1], 0.0, 1.0))
-    except Exception as exc:  # noqa: BLE001 — a single bad row must not abort the batch
+    except Exception as exc:  # noqa: BLE001
         logger.warning("ML scoring failed for one session: %s", exc)
         return 0.0
 
@@ -73,10 +65,15 @@ def _explain(features: dict, score: float) -> dict:
 
 def run(model_path: str = None, threshold: float = None) -> dict:
     model_path = model_path or settings.MODEL_OUTPUT_PATH
-    threshold = threshold if threshold is not None else settings.DETECTION_THRESHOLD
-
     model, feature_names, model_threshold = _load_model(model_path)
-    logger.info("Model loaded: %d features, model_threshold=%.3f", len(feature_names), model_threshold)
+
+    # Explicit function argument wins; otherwise use an explicit environment
+    # override when configured, and finally the validation-selected model threshold.
+    if threshold is None:
+        threshold = settings.DETECTION_THRESHOLD
+    if threshold is None:
+        threshold = model_threshold
+    logger.info("Runtime detection threshold=%.3f", threshold)
 
     raw_events = load_events()
     sessions = create_behavioral_sessions(raw_events)
@@ -94,7 +91,6 @@ def run(model_path: str = None, threshold: float = None) -> dict:
             continue
 
         session_id = getattr(s, "session_id", "unknown")
-
         df = pd.DataFrame([features])
         for col in feature_names:
             if col not in df.columns:
@@ -115,22 +111,14 @@ def run(model_path: str = None, threshold: float = None) -> dict:
 
         ip = getattr(s, "src_ip", "unknown")
         sev = _severity(final_score)
-
         response_outcome = request_block(ip, sev)
-
         timeline = build_timeline(s, extract_features)
         apt_level = detect_apt_behavior(timeline)
 
         if features.get("high_port_spread_flag"):
-            attack_timeline_log.append({
-                "timestamp": datetime.now(UTC).isoformat(),
-                "src_ip": ip, "stage": "RECON", "severity": sev,
-            })
+            attack_timeline_log.append({"timestamp": datetime.now(UTC).isoformat(), "src_ip": ip, "stage": "RECON", "severity": sev})
         if features.get("lateral_movement_flag"):
-            attack_timeline_log.append({
-                "timestamp": datetime.now(UTC).isoformat(),
-                "src_ip": ip, "stage": "LATERAL_MOVEMENT", "severity": sev,
-            })
+            attack_timeline_log.append({"timestamp": datetime.now(UTC).isoformat(), "src_ip": ip, "stage": "LATERAL_MOVEMENT", "severity": sev})
 
         setattr(s, "risk_score", final_score)
         setattr(s, "stages_sequence", timeline)
@@ -148,9 +136,6 @@ def run(model_path: str = None, threshold: float = None) -> dict:
             "attack_timeline": timeline,
             "apt_level": apt_level,
             "event_count": features.get("event_count", 0),
-            # Explicit outcome string, not a boolean — see
-            # core/active_response.py for the full set of possible values
-            # ("disabled", "not_in_allowlist", "dry_run", "executed", ...).
             "active_response": response_outcome,
             "explanation": _explain(features, final_score),
         })
@@ -167,6 +152,7 @@ def run(model_path: str = None, threshold: float = None) -> dict:
         "detections_detail": detections,
         "active_response_enabled": settings.ENABLE_ACTIVE_RESPONSE,
         "active_response_dry_run": settings.ACTIVE_RESPONSE_DRY_RUN,
+        "detection_threshold": threshold,
         "attack_timeline": attack_timeline_log,
     }
 
@@ -175,8 +161,7 @@ def run(model_path: str = None, threshold: float = None) -> dict:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
 
-    logger.info("Pipeline complete: %d sessions, %d detections -> %s",
-                len(sessions), len(detections), out_path)
+    logger.info("Pipeline complete: %d sessions, %d detections -> %s", len(sessions), len(detections), out_path)
     return output
 
 
